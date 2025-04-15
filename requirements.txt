@@ -1,0 +1,4 @@
+biolearn
+seaborn
+pandas
+requests
