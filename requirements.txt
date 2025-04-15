@@ -1,4 +1,3 @@
-biolearn
-seaborn
 pandas
 requests
+sqlite3

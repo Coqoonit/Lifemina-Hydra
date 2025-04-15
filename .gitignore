@@ -6,3 +6,4 @@ test/
 *.csv
 pyaging_data/
 pyaging
+*.db
