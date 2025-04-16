@@ -1,4 +1,11 @@
+numpy
 pandas
-requests
-sqlite3
+matplotlib
+seaborn
+scikit-learn
 scipy
+pycox
+torchtuples
+lifelines
+anndata
+torch

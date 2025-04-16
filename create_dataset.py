@@ -7,6 +7,13 @@ import sqlite3
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+from pycox.models import CoxPH, CoxTime
+from torchtuples import Model
+import torchtuples as tt
+import torch
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from pycox.evaluation import EvalSurv
 
 # === File di origine ===
 data_dir = "NHANES/1988-2018/"
@@ -178,7 +185,7 @@ df_final['HYPERTENSION'] = df_final['HYPERTENSION'].map({
 # Colonne da normalizzare per Cox
 columns_to_normalize = [
     'PhenoAge', 'age', 'SYSTOLIC_PRESSURE', 'DIASTOLIC_PRESSURE',
-    'WAIST_HIP_RATIO', 'BMI', 'HEIGHT', 'WEIGHT', 'DEATH_MONTHS',
+    'WAIST_HIP_RATIO', 'BMI', 'HEIGHT', 'WEIGHT',
     'albumin','creatinine','glucose','log_crp','lymphocyte_percent','mean_cell_volume',
     'red_cell_distribution_width','alkaline_phosphatase','white_blood_cell_count'
 ]
@@ -208,6 +215,7 @@ df_final.to_sql(sqlite_table, conn, if_exists="replace", index=False)
 print(f"✅ Dataset salvato anche su SQLite: {output_sqlite} (tabella '{sqlite_table}')")
 
 # === Visualizzazione delle correlazioni ===
+'''
 correlation_matrix = df_final.corr(numeric_only=True)
 
 subset_corr =  correlation_matrix.loc[['age', 'PhenoAge', 'MORTSTAT'], :]
@@ -224,18 +232,74 @@ plt.xticks(rotation=45, ha="right", fontsize=8)  # 👈 Etichette asse X
 plt.yticks(fontsize=8)                           # 👈 Etichette asse Y
 plt.tight_layout()
 plt.show()
-
-
-
 '''
-query = """
-select SEQN_new, age as AGE, round(PhenoAge,2) as PHENOAGE, DMAETHNR as ETHNICITY,DMARACER as RACE,DMDEDUC2 as EDUCATION,INDFMIN2 as INCOME,CASE WHEN RIAGENDR = 1 THEN 'M' ELSE 'F' END as GENDER,VNAVEBPXSY as SYSTOLIC_PRESSURE,VNLBAVEBPXDI as DIASTOLIC_PRESSURE,BMPWHR as WAIST_HIP_RATIO,BMXBMI as BMI,BMXHT as HEIGHT,BMXWT as WEIGHT,HAR1 as SMOKER,HAR14 as TABACCO,HAR23 as CIGARS,HAT10 as DANCE_LAST_MONTH,HAT12 as EXERCISE_LAST_MONTH,HAT14 as GARDENER_LAST_MONTH,HAT18 as SPORT_LAST_MONTH,HAT1S as WALK_LAST_MONTH,HAT2 as RUN_LAST_MONTH,HAT6 as SWIM_LAST_MONTH,HAT8 as AEROBICS_LAST_MONTH,HSD010 as GENERAL_HEALTH_CONDITION,MORTSTAT,PERMTH_INT as DEATH_MONTHS,VNUCOD_LEADING as DEATH_REASON,VNDIABETES as DIABETES,VNHYPERTEN as HYPERTENSION
-from lifemina
-where (VNUCOD_LEADING not in ('All other causes (residual)', 'Accidents (unintentional injuries) (112-123)') OR VNUCOD_LEADING is NULL) and PHENOAGE < 1e308
-""".format(sqlite_table)
 
-df_query = pd.read_sql_query(query, conn)
-query_output_csv = "query_output.csv"
-df_query.to_csv(query_output_csv, index=False)
-print(f"📄 Risultato query salvato in: {query_output_csv} ({df_query.shape[0]} righe)")
-'''
+
+# 🔹 Definizione delle colonne per pycox
+columns_features = [
+    'PhenoAge', 'age', 'SYSTOLIC_PRESSURE', 'DIASTOLIC_PRESSURE',
+    'WAIST_HIP_RATIO', 'BMI', 'HEIGHT', 'WEIGHT',
+    'albumin', 'creatinine', 'glucose', 'log_crp', 'lymphocyte_percent',
+    'mean_cell_volume', 'red_cell_distribution_width',
+    'alkaline_phosphatase', 'white_blood_cell_count'
+]
+
+# 🔹 Prepara dataset per pycox
+df_surv = df_final.dropna(subset=['DEATH_MONTHS', 'MORTSTAT'] + columns_features)
+df_surv = df_surv[df_surv["DEATH_MONTHS"] >= 0]
+X = df_surv[columns_features].values.astype('float32')
+y = df_surv[['DEATH_MONTHS', 'MORTSTAT']].values.astype('float32')
+
+# 🔹 Normalizzazione
+scaler = StandardScaler()
+X = scaler.fit_transform(X)
+
+# 🔹 Split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 🔹 Model definition
+net = torch.nn.Sequential(
+    torch.nn.Linear(X.shape[1], 32),
+    torch.nn.ReLU(),
+    torch.nn.BatchNorm1d(32),
+    torch.nn.Dropout(0.1),
+    torch.nn.Linear(32, 1)
+)
+
+model = CoxPH(net, tt.optim.Adam)
+model.fit(X_train, (y_train[:,0], y_train[:,1]), batch_size=256, epochs=100, verbose=True)
+model.compute_baseline_hazards()
+
+# 🔹 Evaluation
+surv = model.predict_surv_df(X_test)
+ev = EvalSurv(surv, y_test[:,0], y_test[:,1], censor_surv='km')
+print("Concordance index (C-index):", ev.concordance_td())
+
+# 🔍 Analisi: Concordance Index per singola variabile
+print("\n🔎 Analisi individuale delle feature (C-index univariato):")
+from collections import OrderedDict
+
+scores = {}
+
+for col in columns_features:
+    print(f"🎯 Variabile: {col}")
+    X_single = df_surv[[col]].values.astype("float32")
+    scaler = StandardScaler()
+    X_single = scaler.fit_transform(X_single)
+
+    X_train, X_test, y_train, y_test = train_test_split(X_single, y, test_size=0.2, random_state=42)
+
+    net = torch.nn.Sequential(torch.nn.Linear(1, 1))
+    model = CoxPH(net, tt.optim.Adam)
+    model.fit(X_train, (y_train[:, 0], y_train[:, 1]), batch_size=256, epochs=100, verbose=False)
+    model.compute_baseline_hazards()
+
+    surv = model.predict_surv_df(X_test)
+    ev = EvalSurv(surv, y_test[:, 0], y_test[:, 1], censor_surv="km")
+    scores[col] = ev.concordance_td()
+
+# Ordina e stampa
+scores_sorted = OrderedDict(sorted(scores.items(), key=lambda x: x[1], reverse=True))
+print("\n📊 C-index per singola variabile:")
+for k, v in scores_sorted.items():
+    print(f"{k:<30} {v:.4f}")
